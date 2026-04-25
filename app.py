@@ -9,23 +9,15 @@ from sklearn.metrics import silhouette_score
 
 import plotly.express as px
 
-# ---------------------------------------------------
-# CONFIG
-# ---------------------------------------------------
-st.set_page_config(page_title="Customer Segmentation", layout="wide")
-
+# -----------------------------------
+# PAGE CONFIG
+# -----------------------------------
+st.set_page_config(layout="wide")
 st.title("Customer Segmentation Dashboard")
 
-# ---------------------------------------------------
-# DATA LAYER
-# ---------------------------------------------------
-@st.cache_data
-def load_data(file):
-    if file:
-        return pd.read_csv(file)
-    else:
-        return generate_sample()
-
+# -----------------------------------
+# DATA LOADING
+# -----------------------------------
 def generate_sample():
     np.random.seed(42)
     return pd.DataFrame({
@@ -34,178 +26,165 @@ def generate_sample():
         "Spending_Score": np.random.randint(1, 100, 300)
     })
 
-def clean_data(df):
-    df = df.copy()
-    df.columns = df.columns.str.strip().str.replace(" ", "_")
-    return df
+file = st.file_uploader("Upload Dataset", type=["csv"])
 
-# ---------------------------------------------------
-# SIDEBAR
-# ---------------------------------------------------
-st.sidebar.header("Controls")
+if file:
+    df = pd.read_csv(file)
+else:
+    try:
+        df = pd.read_csv("data/customer_data.csv")
+    except:
+        df = generate_sample()
+        st.info("Using generated dataset")
 
-file = st.sidebar.file_uploader("Upload CSV", type=["csv"])
+df.columns = df.columns.str.strip().str.replace(" ", "_")
 
-df = clean_data(load_data(file))
-
+# -----------------------------------
+# FEATURE SELECTION
+# -----------------------------------
 numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
 
-features = st.sidebar.multiselect(
-    "Features",
+features = st.multiselect(
+    "Select Features",
     numeric_cols,
     default=numeric_cols[:3]
 )
 
-auto_k = st.sidebar.checkbox("Auto-select K (Silhouette)", value=True)
-
-k = st.sidebar.slider("K", 2, 10, 4)
-
-# ---------------------------------------------------
-# VALIDATION
-# ---------------------------------------------------
 if len(features) < 2:
-    st.error("Select at least 2 numeric features")
+    st.warning("Select at least 2 features")
     st.stop()
 
-X = df[features].dropna()
+X = df[features]
 
+# -----------------------------------
+# SCALING
+# -----------------------------------
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 
-# ---------------------------------------------------
+# -----------------------------------
 # MODEL SELECTION
-# ---------------------------------------------------
-@st.cache_data
-def compute_metrics(X_scaled):
+# -----------------------------------
+col1, col2 = st.columns(2)
+
+with col1:
+    wcss = []
     k_range = range(2, 11)
-    wcss, sil = [], []
 
     for k in k_range:
-        model = KMeans(n_clusters=k, n_init=10)
-        labels = model.fit_predict(X_scaled)
-        wcss.append(model.inertia_)
-        sil.append(silhouette_score(X_scaled, labels))
+        km = KMeans(n_clusters=k, n_init=10)
+        km.fit(X_scaled)
+        wcss.append(km.inertia_)
 
-    return list(k_range), wcss, sil
+    fig_elbow = px.line(x=list(k_range), y=wcss,
+                        title="Elbow Method",
+                        markers=True)
+    st.plotly_chart(fig_elbow, use_container_width=True)
 
-k_range, wcss, sil = compute_metrics(X_scaled)
+with col2:
+    sil_scores = []
 
-if auto_k:
-    k = k_range[np.argmax(sil)]
+    for k in k_range:
+        km = KMeans(n_clusters=k, n_init=10)
+        labels = km.fit_predict(X_scaled)
+        sil_scores.append(silhouette_score(X_scaled, labels))
 
-# ---------------------------------------------------
-# MODEL
-# ---------------------------------------------------
-model = KMeans(n_clusters=k, n_init=10)
-labels = model.fit_predict(X_scaled)
+    fig_sil = px.line(x=list(k_range), y=sil_scores,
+                      title="Silhouette Score",
+                      markers=True)
+    st.plotly_chart(fig_sil, use_container_width=True)
 
-df = df.loc[X.index].copy()
-df["Cluster"] = labels
+# -----------------------------------
+# K SELECTION
+# -----------------------------------
+k = st.slider("Number of Clusters (K)", 2, 10, 4)
 
-# ---------------------------------------------------
-# PCA
-# ---------------------------------------------------
+# -----------------------------------
+# CLUSTERING
+# -----------------------------------
+kmeans = KMeans(n_clusters=k, n_init=10)
+df["Cluster"] = kmeans.fit_predict(X_scaled)
+
+# -----------------------------------
+# KPI ROW
+# -----------------------------------
+c1, c2, c3 = st.columns(3)
+
+c1.metric("Total Customers", len(df))
+c2.metric("Features Used", len(features))
+c3.metric("Clusters", k)
+
+# -----------------------------------
+# PCA VISUALIZATION
+# -----------------------------------
 pca = PCA(n_components=2)
 comp = pca.fit_transform(X_scaled)
 
 df["PC1"] = comp[:, 0]
 df["PC2"] = comp[:, 1]
 
-# ---------------------------------------------------
-# TABS
-# ---------------------------------------------------
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["Overview", "Model Selection", "Clusters", "Insights"]
+st.subheader("Cluster Visualization")
+
+fig_scatter = px.scatter(
+    df,
+    x="PC1",
+    y="PC2",
+    color=df["Cluster"].astype(str),
+    opacity=0.7
 )
+st.plotly_chart(fig_scatter, use_container_width=True)
 
-# ---------------------------------------------------
-# OVERVIEW
-# ---------------------------------------------------
-with tab1:
-    st.subheader("Dataset")
-    st.dataframe(df.head())
+# -----------------------------------
+# CLUSTER SIZE
+# -----------------------------------
+st.subheader("Cluster Distribution")
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Rows", len(df))
-    col2.metric("Features", len(features))
-    col3.metric("Clusters", k)
+cluster_counts = df["Cluster"].value_counts().reset_index()
+cluster_counts.columns = ["Cluster", "Count"]
 
-# ---------------------------------------------------
-# MODEL SELECTION
-# ---------------------------------------------------
-with tab2:
-    st.subheader("Elbow Method")
+fig_bar = px.bar(cluster_counts, x="Cluster", y="Count")
+st.plotly_chart(fig_bar, use_container_width=True)
 
-    fig1 = px.line(x=k_range, y=wcss)
-    st.plotly_chart(fig1, use_container_width=True)
+# -----------------------------------
+# FEATURE DISTRIBUTION (KEY UPGRADE)
+# -----------------------------------
+st.subheader("Feature Distribution per Cluster")
 
-    st.subheader("Silhouette Score")
+for feature in features:
+    fig_box = px.box(df, x="Cluster", y=feature, points="outliers")
+    st.plotly_chart(fig_box, use_container_width=True)
 
-    fig2 = px.line(x=k_range, y=sil)
-    st.plotly_chart(fig2, use_container_width=True)
+# -----------------------------------
+# CLUSTER PROFILE
+# -----------------------------------
+st.subheader("Cluster Profiles")
 
-# ---------------------------------------------------
-# CLUSTERS
-# ---------------------------------------------------
-with tab3:
-    st.subheader("Cluster Visualization")
+profile = df.groupby("Cluster").mean(numeric_only=True)
+st.dataframe(profile)
 
-    fig = px.scatter(
-        df, x="PC1", y="PC2",
-        color=df["Cluster"].astype(str),
-        hover_data=features
-    )
-    st.plotly_chart(fig, use_container_width=True)
+# -----------------------------------
+# SMART INSIGHTS
+# -----------------------------------
+st.subheader("Insights")
 
-# ---------------------------------------------------
-# INSIGHTS ENGINE
-# ---------------------------------------------------
-def label_clusters(profile):
-    labels = {}
+def label_cluster(row):
+    labels = []
 
-    for cluster in profile.index:
-        row = profile.loc[cluster]
-        tags = []
+    for col in features:
+        if row[col] > profile[col].mean():
+            labels.append(f"High {col}")
+        else:
+            labels.append(f"Low {col}")
 
-        for col in profile.columns:
-            q75 = profile[col].quantile(0.75)
-            q25 = profile[col].quantile(0.25)
+    return ", ".join(labels)
 
-            if row[col] >= q75:
-                tags.append(f"High {col}")
-            elif row[col] <= q25:
-                tags.append(f"Low {col}")
+for i in profile.index:
+    st.markdown(f"### Cluster {i}")
+    st.write(label_cluster(profile.loc[i]))
+    st.write(profile.loc[i])
 
-        labels[cluster] = ", ".join(tags) if tags else "Average"
-
-    return labels
-
-# ---------------------------------------------------
-# INSIGHTS
-# ---------------------------------------------------
-with tab4:
-    st.subheader("Cluster Profiles")
-
-    profile = df.groupby("Cluster").mean(numeric_only=True)
-    st.dataframe(profile)
-
-    st.subheader("Segment Labels")
-
-    cluster_labels = label_clusters(profile)
-
-    for c, label in cluster_labels.items():
-        st.markdown(f"**Cluster {c}: {label}**")
-        st.write(profile.loc[c])
-
-    # Distribution
-    st.subheader("Cluster Size")
-
-    size_fig = px.histogram(df, x="Cluster")
-    st.plotly_chart(size_fig, use_container_width=True)
-
-    # Download
-    st.download_button(
-        "Download Results",
-        df.to_csv(index=False),
-        "clusters.csv"
-    )
+# -----------------------------------
+# DOWNLOAD
+# -----------------------------------
+csv = df.to_csv(index=False).encode()
+st.download_button("Download Results", csv, "clusters.csv")
