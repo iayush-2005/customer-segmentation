@@ -5,143 +5,207 @@ import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
+from sklearn.metrics import silhouette_score
 
 import plotly.express as px
 
-# -------------------------------
-# PAGE CONFIG
-# -------------------------------
+# ---------------------------------------------------
+# CONFIG
+# ---------------------------------------------------
 st.set_page_config(page_title="Customer Segmentation", layout="wide")
 
-st.title("Customer Segmentation using K-Means")
+st.title("Customer Segmentation Dashboard")
 
-# -------------------------------
-# SESSION STATE
-# -------------------------------
-for key, val in {
-    "k": 4,
-    "run": False
-}.items():
-    if key not in st.session_state:
-        st.session_state[key] = val
+# ---------------------------------------------------
+# DATA LAYER
+# ---------------------------------------------------
+@st.cache_data
+def load_data(file):
+    if file:
+        return pd.read_csv(file)
+    else:
+        return generate_sample()
 
-# -------------------------------
-# DATA LOADING
-# -------------------------------
 def generate_sample():
     np.random.seed(42)
     return pd.DataFrame({
-        "Age": np.random.randint(18, 70, 200),
-        "Annual_Income": np.random.randint(15, 150, 200),
-        "Spending_Score": np.random.randint(1, 100, 200)
+        "Age": np.random.randint(18, 70, 300),
+        "Annual_Income": np.random.randint(15, 150, 300),
+        "Spending_Score": np.random.randint(1, 100, 300)
     })
 
-file = st.file_uploader("Upload CSV", type=["csv"])
+def clean_data(df):
+    df = df.copy()
+    df.columns = df.columns.str.strip().str.replace(" ", "_")
+    return df
 
-if file:
-    df = pd.read_csv(file)
-else:
-    try:
-        df = pd.read_csv("data/customer_data.csv")
-    except:
-        st.warning("No dataset found. Using generated sample data.")
-        df = generate_sample()
+# ---------------------------------------------------
+# SIDEBAR
+# ---------------------------------------------------
+st.sidebar.header("Controls")
 
-# Clean columns
-df.columns = df.columns.str.strip().str.replace(" ", "_")
+file = st.sidebar.file_uploader("Upload CSV", type=["csv"])
 
-st.subheader("Dataset Preview")
-st.dataframe(df.head())
+df = clean_data(load_data(file))
 
-# -------------------------------
-# FEATURE SELECTION
-# -------------------------------
 numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
 
-if len(numeric_cols) < 2:
-    st.error("Need at least 2 numeric columns")
-    st.stop()
-
-features = st.multiselect(
-    "Select features for clustering",
+features = st.sidebar.multiselect(
+    "Features",
     numeric_cols,
     default=numeric_cols[:3]
 )
 
-# -------------------------------
-# K SELECTION
-# -------------------------------
-k = st.slider("Number of Clusters (K)", 2, 10, st.session_state.k)
+auto_k = st.sidebar.checkbox("Auto-select K (Silhouette)", value=True)
 
-if st.button("Run Clustering"):
-    st.session_state.run = True
+k = st.sidebar.slider("K", 2, 10, 4)
 
-# -------------------------------
-# CLUSTERING
-# -------------------------------
-if st.session_state.run:
+# ---------------------------------------------------
+# VALIDATION
+# ---------------------------------------------------
+if len(features) < 2:
+    st.error("Select at least 2 numeric features")
+    st.stop()
 
-    X = df[features]
+X = df[features].dropna()
 
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
 
-    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-    df["Cluster"] = kmeans.fit_predict(X_scaled)
+# ---------------------------------------------------
+# MODEL SELECTION
+# ---------------------------------------------------
+@st.cache_data
+def compute_metrics(X_scaled):
+    k_range = range(2, 11)
+    wcss, sil = [], []
 
-    # -------------------------------
-    # PCA VISUALIZATION
-    # -------------------------------
-    pca = PCA(n_components=2)
-    components = pca.fit_transform(X_scaled)
+    for k in k_range:
+        model = KMeans(n_clusters=k, n_init=10)
+        labels = model.fit_predict(X_scaled)
+        wcss.append(model.inertia_)
+        sil.append(silhouette_score(X_scaled, labels))
 
-    df["PC1"] = components[:, 0]
-    df["PC2"] = components[:, 1]
+    return list(k_range), wcss, sil
 
-    st.subheader("Cluster Visualization (PCA)")
+k_range, wcss, sil = compute_metrics(X_scaled)
+
+if auto_k:
+    k = k_range[np.argmax(sil)]
+
+# ---------------------------------------------------
+# MODEL
+# ---------------------------------------------------
+model = KMeans(n_clusters=k, n_init=10)
+labels = model.fit_predict(X_scaled)
+
+df = df.loc[X.index].copy()
+df["Cluster"] = labels
+
+# ---------------------------------------------------
+# PCA
+# ---------------------------------------------------
+pca = PCA(n_components=2)
+comp = pca.fit_transform(X_scaled)
+
+df["PC1"] = comp[:, 0]
+df["PC2"] = comp[:, 1]
+
+# ---------------------------------------------------
+# TABS
+# ---------------------------------------------------
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["Overview", "Model Selection", "Clusters", "Insights"]
+)
+
+# ---------------------------------------------------
+# OVERVIEW
+# ---------------------------------------------------
+with tab1:
+    st.subheader("Dataset")
+    st.dataframe(df.head())
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Rows", len(df))
+    col2.metric("Features", len(features))
+    col3.metric("Clusters", k)
+
+# ---------------------------------------------------
+# MODEL SELECTION
+# ---------------------------------------------------
+with tab2:
+    st.subheader("Elbow Method")
+
+    fig1 = px.line(x=k_range, y=wcss)
+    st.plotly_chart(fig1, use_container_width=True)
+
+    st.subheader("Silhouette Score")
+
+    fig2 = px.line(x=k_range, y=sil)
+    st.plotly_chart(fig2, use_container_width=True)
+
+# ---------------------------------------------------
+# CLUSTERS
+# ---------------------------------------------------
+with tab3:
+    st.subheader("Cluster Visualization")
 
     fig = px.scatter(
-        df,
-        x="PC1",
-        y="PC2",
+        df, x="PC1", y="PC2",
         color=df["Cluster"].astype(str),
-        title="Customer Segments"
+        hover_data=features
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # -------------------------------
-    # CLUSTER DISTRIBUTION
-    # -------------------------------
-    st.subheader("Cluster Distribution")
+# ---------------------------------------------------
+# INSIGHTS ENGINE
+# ---------------------------------------------------
+def label_clusters(profile):
+    labels = {}
 
-    dist_fig = px.histogram(df, x="Cluster", color="Cluster")
-    st.plotly_chart(dist_fig, use_container_width=True)
+    for cluster in profile.index:
+        row = profile.loc[cluster]
+        tags = []
 
-    # -------------------------------
-    # SAFE AGGREGATION (FIXED)
-    # -------------------------------
-    st.subheader("Cluster Profile")
+        for col in profile.columns:
+            q75 = profile[col].quantile(0.75)
+            q25 = profile[col].quantile(0.25)
 
-    cluster_profile = df.groupby("Cluster").mean(numeric_only=True)
-    st.dataframe(cluster_profile)
+            if row[col] >= q75:
+                tags.append(f"High {col}")
+            elif row[col] <= q25:
+                tags.append(f"Low {col}")
 
-    # -------------------------------
-    # INTERPRETATION
-    # -------------------------------
-    st.subheader("Insights")
+        labels[cluster] = ", ".join(tags) if tags else "Average"
 
-    for i in cluster_profile.index:
-        st.write(f"Cluster {i}:")
-        st.write(cluster_profile.loc[i])
+    return labels
 
-    # -------------------------------
-    # DOWNLOAD
-    # -------------------------------
-    csv = df.to_csv(index=False).encode("utf-8")
+# ---------------------------------------------------
+# INSIGHTS
+# ---------------------------------------------------
+with tab4:
+    st.subheader("Cluster Profiles")
 
+    profile = df.groupby("Cluster").mean(numeric_only=True)
+    st.dataframe(profile)
+
+    st.subheader("Segment Labels")
+
+    cluster_labels = label_clusters(profile)
+
+    for c, label in cluster_labels.items():
+        st.markdown(f"**Cluster {c}: {label}**")
+        st.write(profile.loc[c])
+
+    # Distribution
+    st.subheader("Cluster Size")
+
+    size_fig = px.histogram(df, x="Cluster")
+    st.plotly_chart(size_fig, use_container_width=True)
+
+    # Download
     st.download_button(
-        "Download Clustered Data",
-        csv,
-        "clustered_data.csv",
-        "text/csv"
+        "Download Results",
+        df.to_csv(index=False),
+        "clusters.csv"
     )
