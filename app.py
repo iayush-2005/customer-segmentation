@@ -1,195 +1,147 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import io, json
 
-from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
-from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 
 import plotly.express as px
 
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
+# -------------------------------
+# PAGE CONFIG
+# -------------------------------
+st.set_page_config(page_title="Customer Segmentation", layout="wide")
 
-# ─────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────
-st.set_page_config(layout="wide", page_title="Customer Segmentation Pro")
+st.title("Customer Segmentation using K-Means")
 
-st.title("🚀 Customer Segmentation Pro")
-st.caption("K-Means · Auto Clustering · Business Insights")
+# -------------------------------
+# SESSION STATE
+# -------------------------------
+for key, val in {
+    "k": 4,
+    "run": False
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
 
-# ─────────────────────────────────────
-# LOAD DATA
-# ─────────────────────────────────────
+# -------------------------------
+# DATA LOADING
+# -------------------------------
+def generate_sample():
+    np.random.seed(42)
+    return pd.DataFrame({
+        "Age": np.random.randint(18, 70, 200),
+        "Annual_Income": np.random.randint(15, 150, 200),
+        "Spending_Score": np.random.randint(1, 100, 200)
+    })
+
 file = st.file_uploader("Upload CSV", type=["csv"])
 
 if file:
     df = pd.read_csv(file)
 else:
-    df = pd.read_csv("data/sample.csv")
+    try:
+        df = pd.read_csv("data/customer_data.csv")
+    except:
+        st.warning("No dataset found. Using generated sample data.")
+        df = generate_sample()
 
+# Clean columns
 df.columns = df.columns.str.strip().str.replace(" ", "_")
 
-# ─────────────────────────────────────
+st.subheader("Dataset Preview")
+st.dataframe(df.head())
+
+# -------------------------------
 # FEATURE SELECTION
-# ─────────────────────────────────────
-num_cols = df.select_dtypes(include=np.number).columns.tolist()
+# -------------------------------
+numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+
+if len(numeric_cols) < 2:
+    st.error("Need at least 2 numeric columns")
+    st.stop()
 
 features = st.multiselect(
-    "Select Features",
-    num_cols,
-    default=num_cols[1:4]
+    "Select features for clustering",
+    numeric_cols,
+    default=numeric_cols[:3]
 )
 
-# ─────────────────────────────────────
-# AUTO K
-# ─────────────────────────────────────
-def find_best_k(X):
-    scores = []
-    for k in range(2, 11):
-        labels = KMeans(n_clusters=k, n_init=10).fit_predict(X)
-        score = silhouette_score(X, labels)
-        scores.append(score)
-    return np.argmax(scores) + 2, scores
+# -------------------------------
+# K SELECTION
+# -------------------------------
+k = st.slider("Number of Clusters (K)", 2, 10, st.session_state.k)
 
-# ─────────────────────────────────────
-# RUN
-# ─────────────────────────────────────
-if st.button("🚀 Run Analysis") and len(features) >= 2:
+if st.button("Run Clustering"):
+    st.session_state.run = True
+
+# -------------------------------
+# CLUSTERING
+# -------------------------------
+if st.session_state.run:
 
     X = df[features]
-    X = SimpleImputer().fit_transform(X)
-    X = StandardScaler().fit_transform(X)
 
-    best_k, scores = find_best_k(X)
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
 
-    model = KMeans(n_clusters=best_k, random_state=42, n_init=10)
-    labels = model.fit_predict(X)
+    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+    df["Cluster"] = kmeans.fit_predict(X_scaled)
 
-    df["Cluster"] = labels
+    # -------------------------------
+    # PCA VISUALIZATION
+    # -------------------------------
+    pca = PCA(n_components=2)
+    components = pca.fit_transform(X_scaled)
 
-    sil = silhouette_score(X, labels)
+    df["PC1"] = components[:, 0]
+    df["PC2"] = components[:, 1]
 
-    # ─────────────────────────────
-    # METRICS DASHBOARD
-    # ─────────────────────────────
-    st.subheader("📊 Model Performance")
+    st.subheader("Cluster Visualization (PCA)")
 
-    c1, c2 = st.columns(2)
-    c1.metric("Optimal K", best_k)
-    c2.metric("Silhouette Score", round(sil, 3))
-
-    # ─────────────────────────────
-    # VISUALIZATION
-    # ─────────────────────────────
-    st.subheader("📈 Cluster Visualization")
-
-    if len(features) >= 3:
-        fig = px.scatter_3d(
-            df,
-            x=features[0],
-            y=features[1],
-            z=features[2],
-            color="Cluster"
-        )
-    else:
-        fig = px.scatter(
-            df,
-            x=features[0],
-            y=features[1],
-            color="Cluster"
-        )
-
+    fig = px.scatter(
+        df,
+        x="PC1",
+        y="PC2",
+        color=df["Cluster"].astype(str),
+        title="Customer Segments"
+    )
     st.plotly_chart(fig, use_container_width=True)
 
-    # ─────────────────────────────
-    # ELBOW / SILHOUETTE GRAPH
-    # ─────────────────────────────
-    st.subheader("📉 Silhouette vs K")
+    # -------------------------------
+    # CLUSTER DISTRIBUTION
+    # -------------------------------
+    st.subheader("Cluster Distribution")
 
-    fig2 = px.line(
-        x=list(range(2, 11)),
-        y=scores,
-        markers=True,
-        labels={"x": "K", "y": "Silhouette"}
-    )
+    dist_fig = px.histogram(df, x="Cluster", color="Cluster")
+    st.plotly_chart(dist_fig, use_container_width=True)
 
-    st.plotly_chart(fig2, use_container_width=True)
+    # -------------------------------
+    # SAFE AGGREGATION (FIXED)
+    # -------------------------------
+    st.subheader("Cluster Profile")
 
-    # ─────────────────────────────
-    # CLUSTER PROFILE
-    # ─────────────────────────────
-    st.subheader("📋 Cluster Profiles")
+    cluster_profile = df.groupby("Cluster").mean(numeric_only=True)
+    st.dataframe(cluster_profile)
 
-    profile = df.groupby("Cluster").mean(numeric_only=True)
-    profile["Count"] = df["Cluster"].value_counts().sort_index()
+    # -------------------------------
+    # INTERPRETATION
+    # -------------------------------
+    st.subheader("Insights")
 
-    st.dataframe(profile)
+    for i in cluster_profile.index:
+        st.write(f"Cluster {i}:")
+        st.write(cluster_profile.loc[i])
 
-    # ─────────────────────────────
-    # BUSINESS INSIGHTS
-    # ─────────────────────────────
-    st.subheader("🧠 Business Insights")
+    # -------------------------------
+    # DOWNLOAD
+    # -------------------------------
+    csv = df.to_csv(index=False).encode("utf-8")
 
-    for cid in sorted(df["Cluster"].unique()):
-        grp = df[df["Cluster"] == cid]
-
-        st.markdown(f"### Cluster {cid}")
-
-        desc = []
-        for f in features:
-            val = grp[f].mean()
-            desc.append(f"{f}: {val:.2f}")
-
-        st.write(", ".join(desc))
-
-        # Insight logic
-        if grp[features[0]].mean() > df[features[0]].median():
-            st.success("High-value segment → Focus on premium marketing & retention")
-        else:
-            st.warning("Low-value segment → Improve engagement & offers")
-
-    # ─────────────────────────────
-    # EXPORTS
-    # ─────────────────────────────
-    st.subheader("📦 Export Data")
-
-    col1, col2, col3 = st.columns(3)
-
-    col1.download_button(
-        "CSV",
-        df.to_csv(index=False),
-        "data.csv"
-    )
-
-    # JSON
-    col2.download_button(
-        "JSON",
-        json.dumps(df.to_dict(orient="records")),
-        "data.json"
-    )
-
-    # PDF
-    def generate_pdf():
-        buffer = io.BytesIO()
-        doc = SimpleDocTemplate(buffer)
-        styles = getSampleStyleSheet()
-
-        elements = []
-        elements.append(Paragraph("Customer Segmentation Report", styles["Title"]))
-        elements.append(Spacer(1, 12))
-        elements.append(Paragraph(f"Optimal K: {best_k}", styles["Normal"]))
-        elements.append(Paragraph(f"Silhouette Score: {sil:.3f}", styles["Normal"]))
-
-        doc.build(elements)
-        buffer.seek(0)
-        return buffer
-
-    col3.download_button(
-        "PDF Report",
-        generate_pdf(),
-        "report.pdf"
+    st.download_button(
+        "Download Clustered Data",
+        csv,
+        "clustered_data.csv",
+        "text/csv"
     )
